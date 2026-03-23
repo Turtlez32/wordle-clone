@@ -205,6 +205,7 @@ function extractHintLevels(content: string) {
 }
 
 function App() {
+  const [dayIndex, setDayIndex] = useState(getDayIndex);
   const [answer, setAnswer] = useState(getDailyAnswer);
   const [gameMode, setGameMode] = useState<GameMode>("daily");
   const [guesses, setGuesses] = useState<SubmittedGuess[]>([]);
@@ -290,42 +291,84 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [confettiBurst]);
 
+  async function refreshSessionState() {
+    const nextDayIndex = getDayIndex();
+    const dayChanged = nextDayIndex !== dayIndex;
+
+    if (dayChanged) {
+      setDayIndex(nextDayIndex);
+      setDailyLocked(false);
+
+      if (gameMode === "daily") {
+        setAnswer(getDailyAnswer());
+        setGuesses([]);
+        setCurrentGuess("");
+        setHint({ status: "idle", levels: [], revealed: 1, text: "" });
+        setDefinition({ status: "idle", word: "", text: "" });
+        setNotice({
+          text: "A new daily puzzle is live.",
+          tone: "info",
+        });
+      }
+    }
+
+    const session = await getCurrentSession();
+
+    if (session.authenticated && session.user) {
+      setCurrentUser(session.user);
+      setDailyLocked(session.dailyLocked);
+      setAuthStatus("authenticated");
+      return;
+    }
+
+    setCurrentUser(null);
+    setDailyLocked(false);
+    setAuthStatus("anonymous");
+  }
+
   useEffect(() => {
     let cancelled = false;
 
-    async function loadSession() {
+    async function syncSessionState() {
       try {
-        const session = await getCurrentSession();
-
-        if (cancelled) {
-          return;
-        }
-
-        if (session.authenticated && session.user) {
-          setCurrentUser(session.user);
-          setDailyLocked(session.dailyLocked);
-          setAuthStatus("authenticated");
-          return;
-        }
-
-        setCurrentUser(null);
-        setAuthStatus("anonymous");
+        await refreshSessionState();
       } catch {
         if (cancelled) {
           return;
         }
 
         setCurrentUser(null);
+        setDailyLocked(false);
         setAuthStatus("error");
       }
     }
 
-    loadSession();
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void syncSessionState();
+      }
+    }
+
+    function handleFocus() {
+      void syncSessionState();
+    }
+
+    void syncSessionState();
+
+    const interval = window.setInterval(() => {
+      void syncSessionState();
+    }, 60_000);
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, []);
+  }, [dayIndex, gameMode]);
 
   useEffect(() => {
     if (!isSolved) {
@@ -444,7 +487,7 @@ function App() {
   async function completeRound() {
     if (isDailyMode && userId) {
       await completeDailyRound();
-      setDailyLocked(true);
+      await refreshSessionState();
     }
   }
 
