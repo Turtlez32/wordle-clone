@@ -89,6 +89,36 @@ button {
   animation-fill-mode: forwards;
 }
 
+.auth-card {
+  position: relative;
+  width: min(100%, 540px);
+  padding: 32px 28px;
+  border-radius: 32px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), transparent 34%),
+    rgba(10, 15, 35, 0.78);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(22px);
+  text-align: center;
+}
+
+.auth-copy,
+.auth-note {
+  color: rgba(247, 240, 255, 0.82);
+  line-height: 1.65;
+}
+
+.auth-button {
+  margin-top: 12px;
+  padding: 12px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(61, 187, 115, 0.32), rgba(56, 203, 255, 0.3));
+  color: var(--tile-text);
+  cursor: pointer;
+}
+
 .win-overlay {
   position: absolute;
   inset: 0;
@@ -222,6 +252,29 @@ button {
   max-width: 30rem;
 }
 
+.hero-meta {
+  display: grid;
+  gap: 14px;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.84rem;
+  color: rgba(247, 240, 255, 0.72);
+}
+
+.session-row button {
+  padding: 9px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--tile-text);
+  cursor: pointer;
+}
+
 .status-bar {
   display: flex;
   justify-content: space-between;
@@ -348,6 +401,19 @@ button {
 
 .hint-error {
   border-color: rgba(255, 87, 87, 0.24);
+}
+
+.daily-lock-panel {
+  padding: 18px 20px;
+  border-radius: 22px;
+  border: 1px solid rgba(61, 187, 115, 0.22);
+  background: rgba(61, 187, 115, 0.08);
+}
+
+.daily-lock-panel p {
+  margin: 0;
+  line-height: 1.6;
+  color: rgba(247, 240, 255, 0.86);
 }
 
 .board {
@@ -492,6 +558,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .session-row {
+    flex-wrap: wrap;
+  }
+
   .game-footer {
     justify-content: center;
     flex-wrap: wrap;
@@ -507,6 +577,11 @@ button {
     border-radius: 24px;
     padding: 16px;
     gap: 18px;
+  }
+
+  .auth-card {
+    padding: 24px 18px;
+    border-radius: 24px;
   }
 
   .win-overlay {

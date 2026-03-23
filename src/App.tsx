@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { completeDailyRound, getCurrentSession, signIn, signOut, type SessionUser } from "./auth";
 import {
   evaluateGuess,
   getDayIndex,
@@ -16,6 +17,7 @@ type SubmittedGuess = {
 };
 
 type NoticeTone = "info" | "error" | "success";
+type AuthStatus = "loading" | "authenticated" | "anonymous" | "error";
 type DefinitionState = {
   status: "idle" | "loading" | "ready" | "error";
   word: string;
@@ -27,6 +29,7 @@ type HintState = {
   revealed: number;
   text: string;
 };
+type GameMode = "daily" | "random";
 
 const KEYBOARD_ROWS = ["QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"];
 const CONFETTI_COLORS = ["#3dbb73", "#d7a920", "#4c4f6a", "#ff6eb6", "#35e9ff", "#ff8a3d"];
@@ -65,6 +68,37 @@ function ConfettiBurst() {
         />
       ))}
     </div>
+  );
+}
+
+function AuthScreen({
+  status,
+  onSignIn,
+}: {
+  status: AuthStatus;
+  onSignIn: () => void;
+}) {
+  const copy =
+    status === "error"
+      ? "The backend auth check failed. Verify the Authentik and server settings, then try again."
+      : "Sign in to play the daily puzzle and enforce the per-user 24 hour lock.";
+
+  return (
+    <main className="app-shell">
+      <div className="backdrop backdrop-a" />
+      <div className="backdrop backdrop-b" />
+      <section className="auth-card">
+        <p className="eyebrow">Protected Daily Puzzle</p>
+        <h1>Neon Wordle</h1>
+        <p className="auth-copy">{copy}</p>
+        <button type="button" className="auth-button" onClick={onSignIn}>
+          Sign In With Authentik
+        </button>
+        <p className="auth-note">
+          Expected issuer format: <code>https://auth.turtleware.au/application/o/&lt;slug&gt;/</code>
+        </p>
+      </section>
+    </main>
   );
 }
 
@@ -172,9 +206,13 @@ function extractHintLevels(content: string) {
 
 function App() {
   const [answer, setAnswer] = useState(getDailyAnswer);
+  const [gameMode, setGameMode] = useState<GameMode>("daily");
   const [guesses, setGuesses] = useState<SubmittedGuess[]>([]);
   const [currentGuess, setCurrentGuess] = useState("");
   const [confettiBurst, setConfettiBurst] = useState(0);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
+  const [currentUser, setCurrentUser] = useState<SessionUser | null>(null);
+  const [dailyLocked, setDailyLocked] = useState(false);
   const [hint, setHint] = useState<HintState>({
     status: "idle",
     levels: [],
@@ -191,9 +229,12 @@ function App() {
     tone: "info",
   });
 
+  const userId = currentUser?.sub ?? null;
   const isSolved = guesses.some((guess) => guess.word === answer);
   const isGameOver = isSolved || guesses.length === MAX_GUESSES;
-  const isHintAvailable = guesses.length === MAX_GUESSES - 1 && !isGameOver;
+  const isDailyMode = gameMode === "daily";
+  const isDailyUnavailable = isDailyMode && dailyLocked;
+  const isHintAvailable = guesses.length === MAX_GUESSES - 1 && !isGameOver && !isDailyUnavailable;
 
   const letterStates = useMemo(
     () =>
@@ -248,6 +289,43 @@ function App() {
     const timer = window.setTimeout(() => setConfettiBurst(0), 3200);
     return () => window.clearTimeout(timer);
   }, [confettiBurst]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSession() {
+      try {
+        const session = await getCurrentSession();
+
+        if (cancelled) {
+          return;
+        }
+
+        if (session.authenticated && session.user) {
+          setCurrentUser(session.user);
+          setDailyLocked(session.dailyLocked);
+          setAuthStatus("authenticated");
+          return;
+        }
+
+        setCurrentUser(null);
+        setAuthStatus("anonymous");
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setCurrentUser(null);
+        setAuthStatus("error");
+      }
+    }
+
+    loadSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isSolved) {
@@ -341,6 +419,7 @@ function App() {
   });
 
   function resetGame(mode: "daily" | "random") {
+    setGameMode(mode);
     setAnswer((current) => (mode === "daily" ? getDailyAnswer() : makeRandomAnswer(current)));
     setGuesses([]);
     setCurrentGuess("");
@@ -348,13 +427,25 @@ function App() {
     setHint({ status: "idle", levels: [], revealed: 1, text: "" });
     setDefinition({ status: "idle", word: "", text: "" });
     setNotice({
-      text: mode === "daily" ? "Daily signal reloaded." : "Fresh random transmission.",
+      text:
+        mode === "daily"
+          ? dailyLocked
+            ? "Daily puzzle already completed for today."
+            : "Daily signal reloaded."
+          : "Fresh random transmission.",
       tone: "info",
     });
   }
 
   function triggerConfetti() {
     setConfettiBurst(Date.now());
+  }
+
+  async function completeRound() {
+    if (isDailyMode && userId) {
+      await completeDailyRound();
+      setDailyLocked(true);
+    }
   }
 
   async function requestHint() {
@@ -418,8 +509,16 @@ function App() {
     }));
   }
 
+  function handleSignIn() {
+    signIn();
+  }
+
+  function handleSignOut() {
+    signOut();
+  }
+
   function handleLetter(letter: string) {
-    if (isGameOver || currentGuess.length >= WORD_LENGTH) {
+    if (isGameOver || isDailyUnavailable || currentGuess.length >= WORD_LENGTH) {
       return;
     }
 
@@ -427,15 +526,15 @@ function App() {
   }
 
   function handleBackspace() {
-    if (isGameOver) {
+    if (isGameOver || isDailyUnavailable) {
       return;
     }
 
     setCurrentGuess((guess) => guess.slice(0, -1));
   }
 
-  function handleSubmit() {
-    if (isGameOver) {
+  async function handleSubmit() {
+    if (isGameOver || isDailyUnavailable) {
       return;
     }
 
@@ -457,17 +556,27 @@ function App() {
     setCurrentGuess("");
 
     if (currentGuess === answer) {
+      await completeRound();
       triggerConfetti();
       setNotice({ text: "Lock opened. Perfect hit.", tone: "success" });
       return;
     }
 
     if (nextGuesses.length === MAX_GUESSES) {
+      await completeRound();
       setNotice({ text: `Transmission lost. Answer: ${answer}.`, tone: "info" });
       return;
     }
 
     setNotice({ text: `${MAX_GUESSES - nextGuesses.length} attempts remaining.`, tone: "info" });
+  }
+
+  if (authStatus === "loading") {
+    return <AuthScreen status="loading" onSignIn={handleSignIn} />;
+  }
+
+  if (authStatus !== "authenticated") {
+    return <AuthScreen status={authStatus} onSignIn={handleSignIn} />;
   }
 
   return (
@@ -506,10 +615,18 @@ function App() {
             <p className="eyebrow">Daily Neon Puzzle</p>
             <h1>Neon Wordle</h1>
           </div>
-          <p className="hero-copy">
-            Familiar rules, less restraint. Green, yellow, and gray still run the grid, but the
-            rest of the board leans loud.
-          </p>
+          <div className="hero-meta">
+            <p className="hero-copy">
+              Familiar rules, less restraint. Green, yellow, and gray still run the grid, but the
+              rest of the board leans loud.
+            </p>
+            <div className="session-row">
+              <span>{currentUser?.email ?? currentUser?.preferred_username ?? userId}</span>
+              <button type="button" onClick={handleSignOut}>
+                Sign Out
+              </button>
+            </div>
+          </div>
         </header>
 
         <section className="status-bar">
@@ -559,6 +676,13 @@ function App() {
                 ) : null}
               </>
             ) : null}
+          </section>
+        ) : null}
+
+        {isDailyUnavailable ? (
+          <section className="daily-lock-panel">
+            <span className="definition-label">Daily Complete</span>
+            <p>You have already used today’s daily run. Come back after the next daily reset or switch to Random mode.</p>
           </section>
         ) : null}
 
