@@ -16,6 +16,15 @@ bun run dev
 bun run build
 ```
 
+## Preview
+
+Build the client, then run the Bun server so the auth and daily-lock API routes are available:
+
+```bash
+bun run build
+bun run preview
+```
+
 ## Authentik OIDC Setup
 
 The app now expects OIDC settings in the Bun server environment and blocks gameplay until the user signs in.

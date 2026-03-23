@@ -8,7 +8,7 @@
     "dev:client": "vite",
     "dev:server": "bun run server.ts",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
+    "preview": "bun run server.ts",
     "start": "bun run server.ts"
   },
   "dependencies": {
