@@ -25,6 +25,33 @@ bun run build
 bun run preview
 ```
 
+## Docker
+
+The container builds the Vite client and runs the Bun server that serves `dist` plus the `/api` routes.
+
+Build a local image:
+
+```bash
+docker build -t neon-wordle:local .
+```
+
+Build and push a multi-arch image for swarm:
+
+```bash
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t your-registry/neon-wordle:latest \
+  --push .
+```
+
+Run it with your production environment:
+
+```bash
+docker run --rm -p 3001:3001 --env-file .env your-registry/neon-wordle:latest
+```
+
+For production or swarm, set `APP_ORIGIN` to the public URL for the deployed service, for example `https://wordle.turtleware.au`.
+
 ## Authentik OIDC Setup
 
 The app now expects OIDC settings in the Bun server environment and blocks gameplay until the user signs in.
