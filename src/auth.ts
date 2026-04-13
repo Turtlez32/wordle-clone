@@ -10,6 +10,19 @@ export type SessionResponse = {
   dailyLocked: boolean;
 };
 
+export type UserStats = {
+  user: string;
+  streak: number;
+  totalSolved: number;
+  updatedAt: string | null;
+  lastSolvedDate: string | null;
+  lastSolvedWord: string | null;
+  solvedWords: Array<{
+    date: string;
+    word: string;
+  }>;
+};
+
 export async function getCurrentSession(): Promise<SessionResponse> {
   const response = await fetch("/api/auth/session", {
     credentials: "include",
@@ -30,15 +43,19 @@ export function signOut() {
   window.location.href = "/api/auth/logout";
 }
 
-export async function completeDailyRound() {
+export async function completeDailyRound(payload: { solved: boolean; word: string }) {
   const response = await fetch("/api/daily/complete", {
     method: "POST",
     credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
   });
 
   if (!response.ok) {
     throw new Error("failed to lock daily round");
   }
 
-  return response.json() as Promise<{ locked: boolean }>;
+  return response.json() as Promise<{ locked: boolean; stats: UserStats | null }>;
 }

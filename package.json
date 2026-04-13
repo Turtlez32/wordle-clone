@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "bunx concurrently -k \"bun run dev:server\" \"bun run dev:client\"",
-    "dev:client": "vite",
+    "dev:client": "vite --host 0.0.0.0",
     "dev:server": "bun run server.ts",
     "build": "tsc -b && vite build",
     "preview": "bun run server.ts",
@@ -13,7 +13,8 @@
   },
   "dependencies": {
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "redis": "^5.8.2"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
