@@ -484,9 +484,9 @@ function App() {
     setConfettiBurst(Date.now());
   }
 
-  async function completeRound() {
+  async function completeRound(solved: boolean, word: string) {
     if (isDailyMode && userId) {
-      await completeDailyRound();
+      await completeDailyRound({ solved, word });
       await refreshSessionState();
     }
   }
@@ -599,14 +599,14 @@ function App() {
     setCurrentGuess("");
 
     if (currentGuess === answer) {
-      await completeRound();
+      await completeRound(true, currentGuess);
       triggerConfetti();
       setNotice({ text: "Lock opened. Perfect hit.", tone: "success" });
       return;
     }
 
     if (nextGuesses.length === MAX_GUESSES) {
-      await completeRound();
+      await completeRound(false, answer);
       setNotice({ text: `Transmission lost. Answer: ${answer}.`, tone: "info" });
       return;
     }

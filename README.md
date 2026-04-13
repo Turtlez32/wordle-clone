@@ -49,11 +49,38 @@ APP_ORIGIN=http://localhost:5173
 OIDC_ISSUER=https://auth.turtleware.au/application/o/wordle/
 OIDC_CLIENT_ID=your-client-id
 OIDC_CLIENT_SECRET=
+REDIS_URL=redis://:your-redis-password@redis.turtleware.au:6379
 SESSION_SECRET=replace-this-with-a-long-random-string
+SESSION_TTL_HOURS=24
 ```
 
 For production, set `APP_ORIGIN=https://wordle.turtleware.au`.
 
 ## Daily Lock
 
-The daily lock is now enforced server-side in the local SQLite database and keyed by the authenticated user's subject claim.
+The daily lock is now enforced server-side in Redis and keyed by the authenticated user's subject claim.
+
+## Redis Keys
+
+The Bun server is the only component that talks to Redis.
+
+- `session:<sessionId>` stores the authenticated session payload and expiry.
+- `user:<userId>:daily:<dayIndex>` stores that day's completion record with the date, word, solved flag, and completion time.
+- `<userId>:stats` stores per-user aggregate stats such as:
+
+```json
+{
+  "user": "user-id",
+  "streak": 4,
+  "totalSolved": 12,
+  "updatedAt": "2026-03-23T09:15:00.000Z",
+  "lastSolvedDate": "2026-03-23",
+  "lastSolvedWord": "LIGHT",
+  "solvedWords": [
+    {
+      "date": "2026-03-23",
+      "word": "LIGHT"
+    }
+  ]
+}
+```

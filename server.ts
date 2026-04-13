@@ -1,33 +1,16 @@
-import { Database } from "bun:sqlite";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createClient, type RedisClientType } from "redis";
 
 const PORT = Number(process.env.PORT ?? 3003);
 const APP_ORIGIN = process.env.APP_ORIGIN ?? "http://localhost:5173";
 const OIDC_ISSUER = process.env.OIDC_ISSUER ?? "";
 const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID ?? "";
 const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET ?? "";
+const REDIS_URL = process.env.REDIS_URL ?? "";
 const SESSION_SECRET = process.env.SESSION_SECRET ?? "change-me-in-production";
+const SESSION_TTL_HOURS = Number(process.env.SESSION_TTL_HOURS ?? 24);
 const COOKIE_SECURE = APP_ORIGIN.startsWith("https://");
-
-const db = new Database("wordle.sqlite");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    user_sub TEXT NOT NULL,
-    email TEXT,
-    preferred_username TEXT,
-    expires_at INTEGER NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS daily_locks (
-    user_sub TEXT NOT NULL,
-    day_index INTEGER NOT NULL,
-    completed_at INTEGER NOT NULL,
-    PRIMARY KEY (user_sub, day_index)
-  );
-`);
 
 type DiscoveryDocument = {
   authorization_endpoint: string;
@@ -36,7 +19,7 @@ type DiscoveryDocument = {
   end_session_endpoint?: string;
 };
 
-type SessionRow = {
+type StoredSession = {
   id: string;
   user_sub: string;
   email: string | null;
@@ -44,12 +27,46 @@ type SessionRow = {
   expires_at: number;
 };
 
+type DailyCompletion = {
+  user: string;
+  dayIndex: number;
+  date: string;
+  word: string;
+  solved: boolean;
+  completedAt: string;
+};
+
+type UserStats = {
+  user: string;
+  streak: number;
+  totalSolved: number;
+  updatedAt: string | null;
+  lastSolvedDate: string | null;
+  lastSolvedWord: string | null;
+  solvedWords: Array<{
+    date: string;
+    word: string;
+  }>;
+};
+
 let discoveryCache: DiscoveryDocument | null = null;
+let redisClient: RedisClientType | null = null;
+let redisConnectPromise: Promise<RedisClientType> | null = null;
 
 function getDayIndex(date = new Date()) {
   const utcDate = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
   const epoch = Date.UTC(2024, 0, 1);
   return Math.floor((utcDate - epoch) / 86_400_000);
+}
+
+function getUtcDateString(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function getPreviousUtcDateString(date = new Date()) {
+  const previous = new Date(date);
+  previous.setUTCDate(previous.getUTCDate() - 1);
+  return getUtcDateString(previous);
 }
 
 function json(data: unknown, status = 200) {
@@ -136,6 +153,61 @@ function generateCodeChallenge(verifier: string) {
   return createHash("sha256").update(verifier).digest("base64url");
 }
 
+function getCallbackUrl() {
+  return `${APP_ORIGIN}/api/auth/callback`;
+}
+
+function getLogoutUrl() {
+  return `${APP_ORIGIN}/`;
+}
+
+function getSessionKey(sessionId: string) {
+  return `session:${sessionId}`;
+}
+
+function getDailyCompletionKey(userSub: string, dayIndex: number) {
+  return `user:${userSub}:daily:${dayIndex}`;
+}
+
+function getStatsKey(userSub: string) {
+  return `${userSub}:stats`;
+}
+
+async function getRedis() {
+  if (redisClient?.isReady) {
+    return redisClient;
+  }
+
+  if (!REDIS_URL) {
+    throw new Error("REDIS_URL is not configured");
+  }
+
+  if (!redisConnectPromise) {
+    const client = createClient({
+      url: REDIS_URL,
+    });
+
+    client.on("error", (error) => {
+      console.error("Redis error", error);
+    });
+
+    redisConnectPromise = client
+      .connect()
+      .then(() => {
+        redisClient = client;
+        return client;
+      })
+      .catch((error) => {
+        redisConnectPromise = null;
+        redisClient = null;
+        client.destroy();
+        throw error;
+      });
+  }
+
+  return redisConnectPromise;
+}
+
 async function getDiscoveryDocument() {
   if (discoveryCache) {
     return discoveryCache;
@@ -150,12 +222,29 @@ async function getDiscoveryDocument() {
   return discoveryCache;
 }
 
-function getCallbackUrl() {
-  return `${APP_ORIGIN}/api/auth/callback`;
+async function readJson<T>(key: string) {
+  const redis = await getRedis();
+  const raw = await redis.get(key);
+  return raw ? (JSON.parse(raw) as T) : null;
 }
 
-function getLogoutUrl() {
-  return `${APP_ORIGIN}/`;
+async function writeJson(key: string, value: unknown, ttlSeconds?: number) {
+  const redis = await getRedis();
+  const payload = JSON.stringify(value);
+
+  if (typeof ttlSeconds === "number") {
+    await redis.set(key, payload, {
+      EX: ttlSeconds,
+    });
+    return;
+  }
+
+  await redis.set(key, payload);
+}
+
+async function deleteKey(key: string) {
+  const redis = await getRedis();
+  await redis.del(key);
 }
 
 async function requireSession(request: Request) {
@@ -164,35 +253,89 @@ async function requireSession(request: Request) {
     return null;
   }
 
-  const session = db
-    .query("SELECT id, user_sub, email, preferred_username, expires_at FROM sessions WHERE id = ?1")
-    .get(sessionId) as SessionRow | null;
-
+  const session = await readJson<StoredSession>(getSessionKey(sessionId));
   if (!session) {
     return null;
   }
 
   if (session.expires_at <= Date.now()) {
-    db.query("DELETE FROM sessions WHERE id = ?1").run(sessionId);
+    await deleteKey(getSessionKey(sessionId));
     return null;
   }
 
   return session;
 }
 
-function getDailyLocked(userSub: string) {
-  const today = getDayIndex();
-  const row = db
-    .query("SELECT user_sub FROM daily_locks WHERE user_sub = ?1 AND day_index = ?2")
-    .get(userSub, today);
-
-  return Boolean(row);
+async function getDailyCompletion(userSub: string, dayIndex = getDayIndex()) {
+  return readJson<DailyCompletion>(getDailyCompletionKey(userSub, dayIndex));
 }
 
-function lockDaily(userSub: string) {
-  db.query(
-    "INSERT OR REPLACE INTO daily_locks (user_sub, day_index, completed_at) VALUES (?1, ?2, ?3)",
-  ).run(userSub, getDayIndex(), Date.now());
+async function getDailyLocked(userSub: string) {
+  return Boolean(await getDailyCompletion(userSub));
+}
+
+async function getUserStats(userSub: string) {
+  return readJson<UserStats>(getStatsKey(userSub));
+}
+
+async function updateUserStats(userSub: string, word: string, completedAt: Date) {
+  const current = (await getUserStats(userSub)) ?? {
+    user: userSub,
+    streak: 0,
+    totalSolved: 0,
+    updatedAt: null,
+    lastSolvedDate: null,
+    lastSolvedWord: null,
+    solvedWords: [],
+  };
+
+  const solvedDate = getUtcDateString(completedAt);
+  const alreadyTrackedToday = current.solvedWords.some((entry) => entry.date === solvedDate);
+
+  if (!alreadyTrackedToday) {
+    current.solvedWords.push({
+      date: solvedDate,
+      word,
+    });
+    current.totalSolved += 1;
+  }
+
+  const previousDate = getPreviousUtcDateString(completedAt);
+  if (current.lastSolvedDate === solvedDate) {
+    // Keep the existing streak if the same day is replayed or retried.
+  } else if (current.lastSolvedDate === previousDate) {
+    current.streak += 1;
+  } else {
+    current.streak = 1;
+  }
+
+  current.updatedAt = completedAt.toISOString();
+  current.lastSolvedDate = solvedDate;
+  current.lastSolvedWord = word;
+
+  await writeJson(getStatsKey(userSub), current);
+  return current;
+}
+
+async function recordDailyCompletion(userSub: string, word: string, solved: boolean) {
+  const completedAt = new Date();
+  const completion: DailyCompletion = {
+    user: userSub,
+    dayIndex: getDayIndex(completedAt),
+    date: getUtcDateString(completedAt),
+    word,
+    solved,
+    completedAt: completedAt.toISOString(),
+  };
+
+  await writeJson(getDailyCompletionKey(userSub, completion.dayIndex), completion);
+
+  let stats: UserStats | null = null;
+  if (solved) {
+    stats = await updateUserStats(userSub, word, completedAt);
+  }
+
+  return { completion, stats };
 }
 
 async function handleAuthLogin() {
@@ -216,14 +359,12 @@ async function handleAuthLogin() {
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "S256");
 
-  const transactionCookie = buildCookie(
-    "wordle_auth_tx",
-    encodeSignedCookie({ state, nonce, verifier }),
-    600,
-  );
-
   return redirect(url.toString(), {
-    "Set-Cookie": transactionCookie,
+    "Set-Cookie": buildCookie(
+      "wordle_auth_tx",
+      encodeSignedCookie({ state, nonce, verifier }),
+      600,
+    ),
   });
 }
 
@@ -286,16 +427,21 @@ async function handleAuthCallback(request: Request) {
   };
 
   const sessionId = randomUUID();
-  const expiresAt = Date.now() + (tokenPayload.expires_in ?? 3600) * 1000;
+  const expiresIn = Math.max(tokenPayload.expires_in ?? 3600, SESSION_TTL_HOURS * 3600);
+  const session: StoredSession = {
+    id: sessionId,
+    user_sub: userInfo.sub,
+    email: userInfo.email ?? null,
+    preferred_username: userInfo.preferred_username ?? null,
+    expires_at: Date.now() + expiresIn * 1000,
+  };
 
-  db.query(
-    "INSERT INTO sessions (id, user_sub, email, preferred_username, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-  ).run(sessionId, userInfo.sub, userInfo.email ?? null, userInfo.preferred_username ?? null, expiresAt);
+  await writeJson(getSessionKey(sessionId), session, expiresIn);
 
   const headers = new Headers({
     Location: APP_ORIGIN,
   });
-  headers.append("Set-Cookie", buildCookie("wordle_session", sessionId, tokenPayload.expires_in ?? 3600));
+  headers.append("Set-Cookie", buildCookie("wordle_session", sessionId, expiresIn));
   headers.append("Set-Cookie", clearCookie("wordle_auth_tx"));
 
   return new Response(null, {
@@ -307,7 +453,7 @@ async function handleAuthCallback(request: Request) {
 async function handleLogout(request: Request) {
   const sessionId = getCookieValue(request, "wordle_session");
   if (sessionId) {
-    db.query("DELETE FROM sessions WHERE id = ?1").run(sessionId);
+    await deleteKey(getSessionKey(sessionId));
   }
 
   let logoutTarget = getLogoutUrl();
@@ -352,7 +498,18 @@ async function handleSession(request: Request) {
       email: session.email ?? undefined,
       preferred_username: session.preferred_username ?? undefined,
     },
-    dailyLocked: getDailyLocked(session.user_sub),
+    dailyLocked: await getDailyLocked(session.user_sub),
+  });
+}
+
+async function handleStats(request: Request) {
+  const session = await requireSession(request);
+  if (!session) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  return json({
+    stats: await getUserStats(session.user_sub),
   });
 }
 
@@ -362,8 +519,18 @@ async function handleDailyComplete(request: Request) {
     return json({ error: "unauthorized" }, 401);
   }
 
-  lockDaily(session.user_sub);
-  return json({ locked: true });
+  const body = (await request.json().catch(() => null)) as { solved?: boolean; word?: string } | null;
+  const word = body?.word?.trim().toUpperCase();
+
+  if (!word) {
+    return json({ error: "word is required" }, 400);
+  }
+
+  const { stats } = await recordDailyCompletion(session.user_sub, word, Boolean(body?.solved));
+  return json({
+    locked: true,
+    stats,
+  });
 }
 
 function serveStatic(pathname: string) {
@@ -380,24 +547,33 @@ Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/api/auth/login" && request.method === "GET") {
-      return handleAuthLogin();
-    }
+    try {
+      if (url.pathname === "/api/auth/login" && request.method === "GET") {
+        return await handleAuthLogin();
+      }
 
-    if (url.pathname === "/api/auth/callback" && request.method === "GET") {
-      return handleAuthCallback(request);
-    }
+      if (url.pathname === "/api/auth/callback" && request.method === "GET") {
+        return await handleAuthCallback(request);
+      }
 
-    if (url.pathname === "/api/auth/logout" && request.method === "GET") {
-      return handleLogout(request);
-    }
+      if (url.pathname === "/api/auth/logout" && request.method === "GET") {
+        return await handleLogout(request);
+      }
 
-    if (url.pathname === "/api/auth/session" && request.method === "GET") {
-      return handleSession(request);
-    }
+      if (url.pathname === "/api/auth/session" && request.method === "GET") {
+        return await handleSession(request);
+      }
 
-    if (url.pathname === "/api/daily/complete" && request.method === "POST") {
-      return handleDailyComplete(request);
+      if (url.pathname === "/api/stats" && request.method === "GET") {
+        return await handleStats(request);
+      }
+
+      if (url.pathname === "/api/daily/complete" && request.method === "POST") {
+        return await handleDailyComplete(request);
+      }
+    } catch (error) {
+      console.error("Server request failed", error);
+      return json({ error: "server request failed" }, 500);
     }
 
     const staticResponse = serveStatic(url.pathname);
